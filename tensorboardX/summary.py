@@ -92,21 +92,26 @@ def hparams(hparam_dict=None, metric_dict=None):
 
         if isinstance(v, string_types):
             ssi.hparams[k].string_value = v
-            hps.append(HParamInfo(name=k, type=DataType.DATA_TYPE_STRING))
+            hps.append(HParamInfo(name=k, type=DataType.Value("DATA_TYPE_STRING")))
             continue
 
         if isinstance(v, bool):
             ssi.hparams[k].bool_value = v
-            hps.append(HParamInfo(name=k, type=DataType.DATA_TYPE_BOOL))
+            hps.append(HParamInfo(name=k, type=DataType.Value("DATA_TYPE_BOOL")))
             continue
 
         if isinstance(v, int) or isinstance(v, float):
             v = make_np(v)[0]
             ssi.hparams[k].number_value = v
-            hps.append(HParamInfo(name=k, type=DataType.DATA_TYPE_FLOAT64))
+            hps.append(HParamInfo(name=k, type=DataType.Value("DATA_TYPE_FLOAT64")))
             continue
 
-        hps.append(HParamInfo(name=k, type=DataType.DATA_TYPE_UNSET))
+        if callable(v):
+            ssi.hparams[k].string_value = getattr(v, '__name__', str(v))
+            hps.append(HParamInfo(name=k, type=DataType.Value("DATA_TYPE_STRING")))
+            continue
+
+        hps.append(HParamInfo(name=k, type=DataType.Value("DATA_TYPE_UNSET")))
 
     content = HParamsPluginData(session_start_info=ssi, version=PLUGIN_DATA_VERSION)
     smd = SummaryMetadata(plugin_data=SummaryMetadata.PluginData(plugin_name=PLUGIN_NAME,
@@ -121,7 +126,7 @@ def hparams(hparam_dict=None, metric_dict=None):
                                                                  content=content.SerializeToString()))
     exp = Summary(value=[Summary.Value(tag=EXPERIMENT_TAG, metadata=smd)])
 
-    sei = SessionEndInfo(status=Status.STATUS_SUCCESS)
+    sei = SessionEndInfo(status=Status.Value("STATUS_SUCCESS"))
     content = HParamsPluginData(session_end_info=sei, version=PLUGIN_DATA_VERSION)
     smd = SummaryMetadata(plugin_data=SummaryMetadata.PluginData(plugin_name=PLUGIN_NAME,
                                                                  content=content.SerializeToString()))
@@ -387,32 +392,31 @@ def make_video(tensor, fps):
 
 
 def audio(tag, tensor, sample_rate=44100):
+    """
+    Args:
+      tensor: A 2-D float Tensor of shape `[frames, channels]` where `channels` is 1 or 2.
+        The values should between [-1, 1]. We also accepts 1-D tensor.
+    """
+    import io
+    import soundfile
     tensor = make_np(tensor)
-    tensor = tensor.squeeze()
     if abs(tensor).max() > 1:
         print('warning: audio amplitude out of range, auto clipped.')
         tensor = tensor.clip(-1, 1)
-    assert(tensor.ndim == 1), 'input tensor should be 1 dimensional.'
+    if tensor.ndim == 1:  # old API, which expects single channel audio
+        tensor = np.expand_dims(tensor, axis=1)
 
-    tensor_list = [int(32767.0 * x) for x in tensor]
-    import io
-    import wave
-    import struct
-    fio = io.BytesIO()
-    Wave_write = wave.open(fio, 'wb')
-    Wave_write.setnchannels(1)
-    Wave_write.setsampwidth(2)
-    Wave_write.setframerate(sample_rate)
-    tensor_enc = b''
-    tensor_enc += struct.pack("<" + "h" * len(tensor_list), *tensor_list)
+    assert(tensor.ndim == 2), 'Input tensor should be 2 dimensional.'
+    length_frames, num_channels = tensor.shape
+    assert num_channels == 1 or num_channels == 2, 'The second dimension should be 1 or 2.'
 
-    Wave_write.writeframes(tensor_enc)
-    Wave_write.close()
-    audio_string = fio.getvalue()
-    fio.close()
+    with io.BytesIO() as fio:
+        soundfile.write(fio, tensor, samplerate=sample_rate, format='wav')
+        audio_string = fio.getvalue()
+
     audio = Summary.Audio(sample_rate=sample_rate,
-                          num_channels=1,
-                          length_frames=len(tensor_list),
+                          num_channels=num_channels,
+                          length_frames=length_frames,
                           encoded_audio_string=audio_string,
                           content_type='audio/wav')
     return Summary(value=[Summary.Value(tag=tag, audio=audio)])
